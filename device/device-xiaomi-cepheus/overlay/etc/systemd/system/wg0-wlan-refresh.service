@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh WireGuard wg0 after wlan0 has a default route
+After=NetworkManager-wait-online.service wg-quick@wg0.service
+Wants=wg-quick@wg0.service
+DefaultDependencies=yes
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wg0-refresh-endpoint.sh wait
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

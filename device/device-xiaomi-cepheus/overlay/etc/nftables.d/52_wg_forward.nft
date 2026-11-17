@@ -1,0 +1,7 @@
+#!/usr/sbin/nft -f
+
+table inet filter {
+	chain forward {
+		iifname "wg0" oifname "br-*" accept comment "Accept WireGuard to Docker bridges"
+	}
+}

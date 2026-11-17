@@ -1,0 +1,13 @@
+[Unit]
+Description=Provide ath10k WCN3990 board.bin from modem firmware
+After=msm-firmware-loader.service
+Wants=msm-firmware-loader.service
+Before=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cepheus-ath10k-board.sh
+
+[Install]
+WantedBy=multi-user.target

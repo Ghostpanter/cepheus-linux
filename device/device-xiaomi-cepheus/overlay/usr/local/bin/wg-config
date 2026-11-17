@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/sbin/sudo -n /usr/local/sbin/wg-config "$@"

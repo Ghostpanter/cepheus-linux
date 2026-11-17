@@ -1,0 +1,16 @@
+[Unit]
+Description=Power down the panel and backlight on boot
+After=getty@tty1.service systemd-udevd.service sysinit.target
+Wants=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cepheus-screen off
+ExecStart=/bin/sleep 3
+ExecStart=/usr/local/sbin/cepheus-screen off
+ExecStart=/bin/sleep 5
+ExecStart=/usr/local/sbin/cepheus-screen off
+
+[Install]
+WantedBy=multi-user.target

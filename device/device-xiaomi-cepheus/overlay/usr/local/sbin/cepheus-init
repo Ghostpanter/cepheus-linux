@@ -1,0 +1,734 @@
+#!/bin/sh
+# cepheus-init: choose whether to enable SSH, install Docker, and similar
+# base services on the Xiaomi Mi 9 (cepheus) service phone.
+# Idempotent. Run as root: sudo cepheus-init
+set -e
+
+USER_NAME="${SUDO_USER:-user}"
+DOCKER_PROXY_FILE=/etc/systemd/system/docker.service.d/http-proxy.conf
+WG_CONF=/etc/wireguard/wg0.conf
+NODE_UNIT=/etc/systemd/system/node_exporter.service
+NODE_DEFAULT=/etc/default/node_exporter
+NODE_NFT=/etc/nftables.d/50_node_exporter.nft
+SYS_PROXY_FILE=/etc/profile.d/cepheus-proxy.sh
+SSH_USER="${SUDO_USER:-user}"
+SSH_AUTH_KEYS=""
+SCREEN_OFF_UNIT=cepheus-screen-off.service
+WIFI_CONNECT=/usr/local/bin/wifi-connect
+
+usage() {
+	cat <<'EOF'
+用法: cepheus-init [选项]
+
+不带选项时进入交互菜单，逐项决定是否开启。
+
+  --status                  只显示当前状态
+  --ssh yes|no              开启或关闭 sshd
+  --docker yes|no           安装并启用，或停用 Docker
+  --docker-proxy URL|none   设置或清除 Docker 拉取代理
+  --node-exporter yes|no    开启或关闭 node_exporter (:9100)
+  --wireguard yes|no        启用或停用 wg-quick@wg0（不改密钥）
+  --sys-proxy URL|none      设置或清除系统 HTTP 代理（登录 shell）
+  --ssh-key KEY|URL         给 user 追加 SSH 公钥（也可是 github.com/USER.keys）
+  --wifi                    运行 wifi-connect，扫描并切换 Wi-Fi
+  --screen-off yes|no       开机是否自动关屏
+  --hostname NAME           设置主机名
+  -h, --help                显示帮助
+
+例子:
+  sudo cepheus-init
+  sudo cepheus-init --status
+  sudo cepheus-init --docker yes --docker-proxy http://192.168.31.246:7893
+  sudo cepheus-init --sys-proxy http://192.168.31.246:7893
+  sudo cepheus-init --ssh-key https://github.com/Ghostpanter.keys
+EOF
+}
+
+need_root() {
+	if [ "$(id -u)" -ne 0 ]; then
+		echo "请用 root 运行：sudo cepheus-init" >&2
+		exit 1
+	fi
+}
+
+svc_active() { systemctl is-active --quiet "$1" 2>/dev/null; }
+svc_enabled() { systemctl is-enabled --quiet "$1" 2>/dev/null; }
+
+pkg_installed() { apk info -e "$1" >/dev/null 2>&1; }
+
+current_docker_proxy() {
+	if [ -f "$DOCKER_PROXY_FILE" ]; then
+		sed -n 's/.*HTTP_PROXY=\([^"]*\).*/\1/p' "$DOCKER_PROXY_FILE" | head -n 1
+	fi
+}
+
+ssh_auth_keys_path() {
+	home=$(getent passwd "$SSH_USER" | cut -d: -f6)
+	if [ -n "$home" ]; then
+		echo "$home/.ssh/authorized_keys"
+	fi
+}
+
+current_sys_proxy() {
+	if [ -f "$SYS_PROXY_FILE" ]; then
+		sed -n 's/^export http_proxy=//p' "$SYS_PROXY_FILE" | head -n 1
+	fi
+}
+
+current_wifi() {
+	nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null \
+		| awk -F: '$2=="802-11-wireless"{print $1 " (" $3 ")"; found=1}
+		           END{if(!found) print "未连接"}'
+}
+
+current_hostname() {
+	hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown
+}
+
+screen_off_boot() {
+	# enabled / enabled-runtime / disabled
+	systemctl is-enabled "$SCREEN_OFF_UNIT" 2>/dev/null || echo disabled
+}
+
+node_bin() {
+	if [ -x /usr/bin/node_exporter ]; then
+		echo /usr/bin/node_exporter
+	elif [ -x /usr/sbin/node_exporter ]; then
+		echo /usr/sbin/node_exporter
+	else
+		command -v node_exporter 2>/dev/null || true
+	fi
+}
+
+status_line() {
+	# $1 name, $2 on/off text
+	printf "  %-16s %s\n" "$1" "$2"
+}
+
+show_status() {
+	echo "当前状态"
+	if svc_active sshd; then
+		status_line SSH "已开启（sshd 运行中）"
+	elif svc_enabled sshd; then
+		status_line SSH "已设为开机自启，当前未运行"
+	else
+		status_line SSH "未开启"
+	fi
+
+	if command -v dockerd >/dev/null 2>&1 && svc_active docker; then
+		status_line Docker "已安装，正在运行"
+	elif command -v dockerd >/dev/null 2>&1 && svc_enabled docker; then
+		status_line Docker "已安装，已开机自启，当前未运行"
+	elif command -v dockerd >/dev/null 2>&1; then
+		status_line Docker "已安装，未启用"
+	else
+		status_line Docker "未安装"
+	fi
+	proxy=$(current_docker_proxy || true)
+	if [ -n "$proxy" ]; then
+		status_line "Docker 代理" "$proxy"
+	else
+		status_line "Docker 代理" "未设置"
+	fi
+
+	if svc_active node_exporter; then
+		status_line node_exporter "已开启（:9100）"
+	elif svc_enabled node_exporter; then
+		status_line node_exporter "已设为开机自启，当前未运行"
+	else
+		status_line node_exporter "未开启"
+	fi
+
+	if [ ! -f "$WG_CONF" ]; then
+		status_line "WireGuard wg0" "未配置（没有 $WG_CONF）"
+	elif svc_active wg-quick@wg0; then
+		status_line "WireGuard wg0" "已开启"
+	elif svc_enabled wg-quick@wg0; then
+		status_line "WireGuard wg0" "已设为开机自启，当前未运行"
+	else
+		status_line "WireGuard wg0" "已有配置，未启用"
+	fi
+
+	sys_proxy=$(current_sys_proxy || true)
+	if [ -n "$sys_proxy" ]; then
+		status_line "系统代理" "$sys_proxy"
+	else
+		status_line "系统代理" "未设置"
+	fi
+
+	keys=$(ssh_auth_keys_path)
+	if [ -n "$keys" ] && [ -s "$keys" ]; then
+		n=$(grep -cve '^[[:space:]]*$' -e '^#' "$keys" 2>/dev/null || echo 0)
+		status_line "SSH 公钥" "user 已有 ${n} 把"
+	else
+		status_line "SSH 公钥" "user 还没有 authorized_keys"
+	fi
+
+	status_line "Wi-Fi" "$(current_wifi)"
+	status_line "主机名" "$(current_hostname)"
+
+	so=$(screen_off_boot)
+	if [ "$so" = enabled ]; then
+		status_line "开机关屏" "已开启"
+	elif [ "$so" = enabled-runtime ]; then
+		status_line "开机关屏" "本次启动已开（尚未写入开机自启）"
+	else
+		status_line "开机关屏" "未开启"
+	fi
+}
+
+ask_yn() {
+	# $1 prompt, $2 default Y or N
+	prompt=$1
+	def=$2
+	if [ "$def" = Y ]; then
+		hint="Y/n"
+	else
+		hint="y/N"
+	fi
+	if [ ! -t 0 ]; then
+		echo "$prompt [$hint] （非交互，使用默认 $def）"
+		[ "$def" = Y ]
+		return
+	fi
+	printf "%s [%s] " "$prompt" "$hint"
+	read -r ans || ans=
+	ans=$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')
+	if [ -z "$ans" ]; then
+		[ "$def" = Y ]
+		return
+	fi
+	case "$ans" in
+	y|yes|是) return 0 ;;
+	n|no|否) return 1 ;;
+	*) echo "请回答 y 或 n" >&2; ask_yn "$prompt" "$def" ;;
+	esac
+}
+
+ask_text() {
+	# $1 prompt, $2 default (may be empty)
+	prompt=$1
+	def=$2
+	if [ ! -t 0 ]; then
+		printf '%s\n' "$def"
+		return
+	fi
+	if [ -n "$def" ]; then
+		printf "%s [%s] " "$prompt" "$def"
+	else
+		printf "%s " "$prompt"
+	fi
+	read -r ans || ans=
+	if [ -z "$ans" ]; then
+		printf '%s\n' "$def"
+	else
+		printf '%s\n' "$ans"
+	fi
+}
+
+confirm_dangerous() {
+	msg=$1
+	echo "$msg" >&2
+	if [ ! -t 0 ]; then
+		echo "非交互模式下拒绝此危险操作，请加上确认或改在终端里运行。" >&2
+		return 1
+	fi
+	printf "请输入 YES 确认： "
+	read -r ans || ans=
+	[ "$ans" = YES ]
+}
+
+enable_ssh() {
+	apk add openssh openssh-server >/dev/null
+	systemctl enable --now sshd
+	echo "SSH 已开启。默认端口 22。"
+}
+
+disable_ssh() {
+	echo "关闭 sshd 会断开所有 SSH 连接（包括 USB 和 WireGuard）。"
+	if ! confirm_dangerous "确认要关闭 SSH 吗？"; then
+		echo "已取消，SSH 保持原状。"
+		return 0
+	fi
+	systemctl disable --now sshd
+	echo "SSH 已关闭。"
+}
+
+enable_docker() {
+	apk add docker docker-cli docker-cli-compose
+	if id "$USER_NAME" >/dev/null 2>&1; then
+		addgroup "$USER_NAME" docker 2>/dev/null || true
+	fi
+	systemctl enable --now docker
+	echo "Docker 已开启。账号 $USER_NAME 已加入 docker 组（重新登录后无需 sudo）。"
+}
+
+disable_docker() {
+	systemctl disable --now docker 2>/dev/null || true
+	echo "Docker 服务已停用（软件包仍保留）。"
+}
+
+set_docker_proxy() {
+	url=$1
+	if [ -z "$url" ] || [ "$url" = none ] || [ "$url" = "NONE" ]; then
+		if [ -f "$DOCKER_PROXY_FILE" ]; then
+			rm -f "$DOCKER_PROXY_FILE"
+			systemctl daemon-reload
+			if svc_active docker; then
+				systemctl restart docker
+			fi
+			echo "Docker 代理已清除。"
+		else
+			echo "本来就没有 Docker 代理。"
+		fi
+		return 0
+	fi
+	install -d /etc/systemd/system/docker.service.d
+	cat > "$DOCKER_PROXY_FILE" <<EOF
+[Service]
+Environment="HTTP_PROXY=$url"
+Environment="HTTPS_PROXY=$url"
+Environment="NO_PROXY=localhost,127.0.0.1,::1,172.16.0.0/16,192.168.0.0/16,10.0.0.0/8"
+EOF
+	systemctl daemon-reload
+	if svc_active docker; then
+		systemctl restart docker
+	fi
+	echo "Docker 代理已设为 $url"
+}
+
+ensure_node_unit() {
+	bin=$(node_bin)
+	if [ -z "$bin" ]; then
+		apk add prometheus-node-exporter
+		bin=$(node_bin)
+	fi
+	if [ -z "$bin" ]; then
+		echo "找不到 node_exporter 可执行文件" >&2
+		return 1
+	fi
+	if [ ! -f "$NODE_UNIT" ]; then
+		# prefer the path that actually exists
+		cat > "$NODE_UNIT" <<EOF
+[Unit]
+Description=Prometheus Node Exporter
+Documentation=https://github.com/prometheus/node_exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=prometheus
+Group=prometheus
+EnvironmentFile=-/etc/default/node_exporter
+ExecStart=$bin \$NODE_EXPORTER_ARGS
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	fi
+	if [ ! -f "$NODE_DEFAULT" ]; then
+		printf '%s\n' "# Extra flags for node_exporter. Default listens on all interfaces, port 9100." \
+			"NODE_EXPORTER_ARGS='--web.listen-address=:9100'" > "$NODE_DEFAULT"
+	fi
+	if [ ! -f "$NODE_NFT" ]; then
+		cat > "$NODE_NFT" <<'EOF'
+#!/usr/sbin/nft -f
+
+table inet filter {
+	chain input {
+		tcp dport 9100 accept comment "accept node_exporter"
+	}
+}
+EOF
+		systemctl reload nftables 2>/dev/null || nft -f /etc/nftables.conf 2>/dev/null || true
+	fi
+	# package user
+	if ! getent passwd prometheus >/dev/null; then
+		adduser -S -H -D -s /sbin/nologin prometheus 2>/dev/null || true
+	fi
+	systemctl daemon-reload
+}
+
+enable_node_exporter() {
+	ensure_node_unit
+	systemctl enable --now node_exporter
+	echo "node_exporter 已开启，监听 :9100。"
+}
+
+disable_node_exporter() {
+	systemctl disable --now node_exporter 2>/dev/null || true
+	echo "node_exporter 已关闭。"
+}
+
+enable_wireguard() {
+	if [ ! -f "$WG_CONF" ]; then
+		echo "没有 $WG_CONF，未启用 WireGuard。请先放好配置再运行。" >&2
+		return 1
+	fi
+	apk add wireguard-tools >/dev/null 2>&1 || true
+	systemctl enable --now wg-quick@wg0
+	if [ -f /etc/systemd/system/wg0-wlan-refresh.service ]; then
+		systemctl enable --now wg0-wlan-refresh.service 2>/dev/null || true
+	fi
+	echo "WireGuard wg0 已启用（未改动密钥和配置内容）。"
+}
+
+disable_wireguard() {
+	echo "关闭 WireGuard 会断开经 10.10.10.9 的远程连接。"
+	if ! confirm_dangerous "确认要关闭 WireGuard wg0 吗？"; then
+		echo "已取消，WireGuard 保持原状。"
+		return 0
+	fi
+	systemctl disable --now wg-quick@wg0 2>/dev/null || true
+	systemctl disable --now wg0-wlan-refresh.service 2>/dev/null || true
+	echo "WireGuard wg0 已关闭（配置文件仍保留）。"
+}
+
+set_sys_proxy() {
+	url=$1
+	if [ -z "$url" ] || [ "$url" = none ] || [ "$url" = NONE ]; then
+		if [ -f "$SYS_PROXY_FILE" ]; then
+			rm -f "$SYS_PROXY_FILE"
+			echo "系统 HTTP 代理已清除（新开的 shell 生效）。"
+		else
+			echo "本来就没有系统 HTTP 代理。"
+		fi
+		return 0
+	fi
+	cat > "$SYS_PROXY_FILE" <<EOF
+# generated by cepheus-init
+export http_proxy=$url
+export https_proxy=$url
+export ftp_proxy=$url
+export no_proxy=localhost,127.0.0.1,::1,172.16.0.0/16,192.168.0.0/16,10.0.0.0/8
+EOF
+	chmod 644 "$SYS_PROXY_FILE"
+	echo "系统 HTTP 代理已设为 $url（新开的 shell 生效；Docker 代理是单独一项）。"
+}
+
+add_ssh_key() {
+	keyspec=$1
+	[ -n "$keyspec" ] || return 0
+	if [ "$keyspec" = none ] || [ "$keyspec" = NONE ]; then
+		echo "未改动 SSH 公钥。"
+		return 0
+	fi
+	home=$(getent passwd "$SSH_USER" | cut -d: -f6)
+	if [ -z "$home" ]; then
+		echo "找不到用户 $SSH_USER，无法写入公钥。" >&2
+		return 1
+	fi
+	key=$keyspec
+	case "$keyspec" in
+	http://*|https://*)
+		key=$(wget -qO- "$keyspec") || {
+			echo "无法从 $keyspec 拉取公钥" >&2
+			return 1
+		}
+		;;
+	esac
+	# keep only key-looking lines
+	key=$(printf '%s\n' "$key" | grep -E '^(ssh-|ecdsa-|sk-)' || true)
+	if [ -z "$key" ]; then
+		echo "没有识别到有效的 SSH 公钥。" >&2
+		return 1
+	fi
+	umask 077
+	mkdir -p "$home/.ssh"
+	keys="$home/.ssh/authorized_keys"
+	touch "$keys"
+	added=0
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		if grep -Fqx "$line" "$keys" 2>/dev/null; then
+			echo "这把公钥已经在 $keys 里了。"
+		else
+			printf '%s\n' "$line" >> "$keys"
+			added=$((added + 1))
+		fi
+	done <<EOF
+$key
+EOF
+	chown -R "$SSH_USER:$SSH_USER" "$home/.ssh"
+	chmod 700 "$home/.ssh"
+	chmod 600 "$keys"
+	if [ "$added" -gt 0 ]; then
+		echo "已给 $SSH_USER 追加 ${added} 把 SSH 公钥。"
+	fi
+}
+
+run_wifi_connect() {
+	if [ ! -x "$WIFI_CONNECT" ]; then
+		echo "找不到 $WIFI_CONNECT，无法扫描连接 Wi-Fi。" >&2
+		return 1
+	fi
+	if [ ! -t 0 ]; then
+		echo "切换 Wi-Fi 需要交互终端，请在 SSH 里运行：sudo wifi-connect" >&2
+		return 1
+	fi
+	echo "启动 wifi-connect（当前：$(current_wifi)）。"
+	# script uses sudo nmcli internally; running as root is fine
+	"$WIFI_CONNECT"
+}
+
+set_screen_off_boot() {
+	want=$1
+	if [ ! -f /etc/systemd/system/$SCREEN_OFF_UNIT ] && [ ! -x /usr/local/sbin/cepheus-screen ]; then
+		echo "这台机器还没有开机关屏服务，跳过。" >&2
+		return 1
+	fi
+	if [ "$want" = yes ]; then
+		systemctl enable --now "$SCREEN_OFF_UNIT"
+		if [ -x /usr/local/sbin/cepheus-screen ]; then
+			/usr/local/sbin/cepheus-screen off >/dev/null 2>&1 || true
+		fi
+		echo "已设为开机关屏，并写入开机自启。"
+	else
+		systemctl disable --now "$SCREEN_OFF_UNIT" 2>/dev/null || true
+		echo "已取消开机关屏（不自动亮屏，需要亮屏时用：sudo screen on）。"
+	fi
+}
+
+set_hostname_to() {
+	name=$1
+	[ -n "$name" ] || return 0
+	if [ "$name" = "$(current_hostname)" ]; then
+		echo "主机名已是 $name，无需改动。"
+		return 0
+	fi
+	if command -v hostnamectl >/dev/null 2>&1; then
+		hostnamectl set-hostname "$name"
+	else
+		echo "$name" > /etc/hostname
+		hostname "$name"
+	fi
+	echo "主机名已设为 $name。"
+}
+
+normalize_yn() {
+	v=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+	case "$v" in
+	y|yes|on|1|是) echo yes ;;
+	n|no|off|0|否) echo no ;;
+	*) echo "参数必须是 yes 或 no：$1" >&2; exit 2 ;;
+	esac
+}
+
+WANT_SSH=
+WANT_DOCKER=
+WANT_PROXY=
+WANT_NODE=
+WANT_WG=
+WANT_SYS_PROXY=
+WANT_SSH_KEY=
+WANT_WIFI=0
+WANT_SCREEN_OFF=
+WANT_HOSTNAME=
+DO_STATUS=0
+INTERACTIVE=1
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-h|--help) usage; exit 0 ;;
+	--status) DO_STATUS=1; INTERACTIVE=0; shift ;;
+	--ssh) WANT_SSH=$(normalize_yn "$2"); INTERACTIVE=0; shift 2 ;;
+	--docker) WANT_DOCKER=$(normalize_yn "$2"); INTERACTIVE=0; shift 2 ;;
+	--docker-proxy) WANT_PROXY=$2; INTERACTIVE=0; shift 2 ;;
+	--node-exporter) WANT_NODE=$(normalize_yn "$2"); INTERACTIVE=0; shift 2 ;;
+	--wireguard) WANT_WG=$(normalize_yn "$2"); INTERACTIVE=0; shift 2 ;;
+	--sys-proxy) WANT_SYS_PROXY=$2; INTERACTIVE=0; shift 2 ;;
+	--ssh-key) WANT_SSH_KEY=$2; INTERACTIVE=0; shift 2 ;;
+	--wifi) WANT_WIFI=1; INTERACTIVE=0; shift ;;
+	--screen-off) WANT_SCREEN_OFF=$(normalize_yn "$2"); INTERACTIVE=0; shift 2 ;;
+	--hostname) WANT_HOSTNAME=$2; INTERACTIVE=0; shift 2 ;;
+	*) echo "未知选项：$1" >&2; usage >&2; exit 2 ;;
+	esac
+done
+
+need_root
+
+if [ "$DO_STATUS" -eq 1 ]; then
+	show_status
+	exit 0
+fi
+
+echo "小米 9（cepheus）初始化"
+echo
+show_status
+echo
+
+if [ "$INTERACTIVE" -eq 1 ]; then
+	echo "对每一项直接回车，表示保持或采用括号里的默认值。"
+	echo
+
+	if svc_enabled sshd || svc_active sshd; then ssh_def=Y; else ssh_def=N; fi
+	if ask_yn "开启 SSH 远程登录？" "$ssh_def"; then WANT_SSH=yes; else WANT_SSH=no; fi
+
+	if command -v dockerd >/dev/null 2>&1 && (svc_enabled docker || svc_active docker); then
+		docker_def=Y
+	elif command -v dockerd >/dev/null 2>&1; then
+		docker_def=N
+	else
+		docker_def=Y
+	fi
+	if ask_yn "安装并启用 Docker？" "$docker_def"; then WANT_DOCKER=yes; else WANT_DOCKER=no; fi
+
+	cur_proxy=$(current_docker_proxy || true)
+	echo "Docker 代理：输入 URL 设置，输入 none 清除，回车保持现状。"
+	WANT_PROXY=$(ask_text "Docker 代理" "${cur_proxy}")
+
+	if svc_enabled node_exporter || svc_active node_exporter; then node_def=Y; else node_def=Y; fi
+	if ask_yn "开启 node_exporter 监控（端口 9100）？" "$node_def"; then WANT_NODE=yes; else WANT_NODE=no; fi
+
+	if [ -f "$WG_CONF" ]; then
+		if svc_enabled wg-quick@wg0 || svc_active wg-quick@wg0; then wg_def=Y; else wg_def=N; fi
+		if ask_yn "启用 WireGuard wg0？（不会改配置和密钥）" "$wg_def"; then WANT_WG=yes; else WANT_WG=no; fi
+	else
+		echo "没有 $WG_CONF，跳过 WireGuard。"
+		WANT_WG=
+	fi
+
+	cur_sys=$(current_sys_proxy || true)
+	echo "系统 HTTP 代理（影响登录 shell，和 Docker 代理分开）：输入 URL 设置，none 清除，回车保持现状。"
+	WANT_SYS_PROXY=$(ask_text "系统 HTTP 代理" "${cur_sys}")
+
+	echo "给 $SSH_USER 追加 SSH 公钥：粘贴公钥，或输入 https://github.com/用户名.keys，回车跳过。"
+	WANT_SSH_KEY=$(ask_text "SSH 公钥" "")
+
+	echo "当前 Wi-Fi：$(current_wifi)"
+	if ask_yn "要扫描并切换 Wi-Fi 吗？" N; then
+		WANT_WIFI=1
+	else
+		WANT_WIFI=0
+	fi
+
+	so=$(screen_off_boot)
+	if [ "$so" = enabled ] || [ "$so" = enabled-runtime ]; then so_def=Y; else so_def=Y; fi
+	if ask_yn "开机自动关屏？" "$so_def"; then WANT_SCREEN_OFF=yes; else WANT_SCREEN_OFF=no; fi
+
+	WANT_HOSTNAME=$(ask_text "主机名" "$(current_hostname)")
+	echo
+fi
+
+# Apply. Compare against current state so a default "keep as-is" does not
+# bounce services or ask for a dangerous confirmation unnecessarily.
+if [ "$WANT_SSH" = yes ]; then
+	if svc_active sshd && svc_enabled sshd; then
+		echo "SSH 已是开启状态，无需改动。"
+	else
+		enable_ssh
+	fi
+elif [ "$WANT_SSH" = no ]; then
+	if svc_active sshd || svc_enabled sshd; then
+		disable_ssh
+	else
+		echo "SSH 已是关闭状态，无需改动。"
+	fi
+fi
+
+if [ "$WANT_DOCKER" = yes ]; then
+	if command -v dockerd >/dev/null 2>&1 && svc_active docker && svc_enabled docker; then
+		if id "$USER_NAME" >/dev/null 2>&1; then
+			addgroup "$USER_NAME" docker 2>/dev/null || true
+		fi
+		echo "Docker 已是开启状态，无需改动。"
+	else
+		enable_docker
+	fi
+elif [ "$WANT_DOCKER" = no ]; then
+	if svc_active docker || svc_enabled docker; then
+		disable_docker
+	else
+		echo "Docker 已是关闭状态，无需改动。"
+	fi
+fi
+
+if [ -n "$WANT_PROXY" ]; then
+	cur_proxy=$(current_docker_proxy || true)
+	if [ "$WANT_PROXY" = none ] || [ "$WANT_PROXY" = NONE ]; then
+		if [ -n "$cur_proxy" ]; then
+			set_docker_proxy none
+		fi
+	elif [ "$WANT_PROXY" = "$cur_proxy" ]; then
+		echo "Docker 代理已是 $cur_proxy，无需改动。"
+	else
+		set_docker_proxy "$WANT_PROXY"
+	fi
+fi
+
+if [ "$WANT_NODE" = yes ]; then
+	if svc_active node_exporter && svc_enabled node_exporter; then
+		echo "node_exporter 已是开启状态，无需改动。"
+	else
+		enable_node_exporter
+	fi
+elif [ "$WANT_NODE" = no ]; then
+	if svc_active node_exporter || svc_enabled node_exporter; then
+		disable_node_exporter
+	else
+		echo "node_exporter 已是关闭状态，无需改动。"
+	fi
+fi
+
+if [ "$WANT_WG" = yes ]; then
+	if svc_active wg-quick@wg0 && svc_enabled wg-quick@wg0; then
+		echo "WireGuard wg0 已是开启状态，无需改动。"
+	else
+		enable_wireguard
+	fi
+elif [ "$WANT_WG" = no ]; then
+	if svc_active wg-quick@wg0 || svc_enabled wg-quick@wg0; then
+		disable_wireguard
+	else
+		echo "WireGuard wg0 已是关闭状态，无需改动。"
+	fi
+fi
+
+if [ -n "$WANT_SYS_PROXY" ]; then
+	cur_sys=$(current_sys_proxy || true)
+	if [ "$WANT_SYS_PROXY" = none ] || [ "$WANT_SYS_PROXY" = NONE ]; then
+		if [ -n "$cur_sys" ]; then
+			set_sys_proxy none
+		fi
+	elif [ "$WANT_SYS_PROXY" = "$cur_sys" ]; then
+		echo "系统 HTTP 代理已是 $cur_sys，无需改动。"
+	else
+		set_sys_proxy "$WANT_SYS_PROXY"
+	fi
+fi
+
+if [ -n "$WANT_SSH_KEY" ]; then
+	add_ssh_key "$WANT_SSH_KEY"
+fi
+
+if [ "$WANT_WIFI" = 1 ]; then
+	run_wifi_connect
+fi
+
+if [ "$WANT_SCREEN_OFF" = yes ]; then
+	so=$(screen_off_boot)
+	if [ "$so" = enabled ]; then
+		echo "开机关屏已是开启状态，无需改动。"
+	else
+		set_screen_off_boot yes
+	fi
+elif [ "$WANT_SCREEN_OFF" = no ]; then
+	so=$(screen_off_boot)
+	if [ "$so" = disabled ] || [ -z "$so" ]; then
+		echo "开机关屏已是关闭状态，无需改动。"
+	else
+		set_screen_off_boot no
+	fi
+fi
+
+if [ -n "$WANT_HOSTNAME" ]; then
+	set_hostname_to "$WANT_HOSTNAME"
+fi
+
+echo
+echo "完成。"
+show_status

@@ -1,0 +1,49 @@
+#!/bin/sh
+# Turn the Cepheus (Mi 9) panel and backlight off or on.
+BL=/sys/class/backlight/ae94000.dsi.0
+DRM=/sys/class/drm/card0-DSI-1
+FB=/sys/class/graphics/fb0
+ON_BRIGHTNESS=1023
+
+wait_for() {
+    path=$1
+    i=0
+    while [ "$i" -lt 30 ]; do
+        [ -e "$path" ] && return 0
+        i=$((i + 1))
+        sleep 1
+    done
+    return 1
+}
+
+cmd=${1:-off}
+case "$cmd" in
+    off)
+        wait_for "$BL/bl_power" || exit 0
+        echo 4 > "$BL/bl_power" 2>/dev/null || true
+        echo 0 > "$BL/brightness" 2>/dev/null || true
+        if [ -e "$DRM/dpms" ]; then
+            echo Off > "$DRM/dpms" 2>/dev/null || true
+        fi
+        if [ -e "$FB/blank" ]; then
+            echo 4 > "$FB/blank" 2>/dev/null || true
+        fi
+        echo "screen off"
+        ;;
+    on)
+        wait_for "$BL/bl_power" || exit 0
+        if [ -e "$FB/blank" ]; then
+            echo 0 > "$FB/blank" 2>/dev/null || true
+        fi
+        if [ -e "$DRM/dpms" ]; then
+            echo On > "$DRM/dpms" 2>/dev/null || true
+        fi
+        echo 0 > "$BL/bl_power" 2>/dev/null || true
+        echo "$ON_BRIGHTNESS" > "$BL/brightness" 2>/dev/null || true
+        echo "screen on (brightness=$ON_BRIGHTNESS)"
+        ;;
+    *)
+        echo "usage: screen on|off" >&2
+        exit 2
+        ;;
+esac

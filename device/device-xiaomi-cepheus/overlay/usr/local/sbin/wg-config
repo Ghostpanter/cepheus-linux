@@ -1,0 +1,229 @@
+#!/bin/sh
+set -eu
+
+CONFDIR=/etc/wireguard
+
+die() { echo "错误: $*" >&2; exit 1; }
+
+need_root() {
+	if [ "$(id -u)" -ne 0 ]; then
+		die "需要 root"
+	fi
+}
+
+usage() {
+	cat <<'EOF'
+用法:
+  wg-config                 交互配置接口并开机自启
+  wg-config import <文件> [接口名]
+                            导入 WireGuard 配置并开机自启
+  wg-config pubkey [接口]   显示本机公钥（默认 wg0）
+  wg-config status [接口]
+  wg-config up [接口]
+  wg-config down [接口]
+  wg-config enable [接口]   设为开机自启并立即启动
+  wg-config disable [接口]  关闭并取消开机自启
+
+配置文件位于 /etc/wireguard/<接口名>.conf
+导入或交互生成后，也可以直接改这个文件，再执行 wg-config up
+EOF
+}
+
+ensure_dir() {
+	mkdir -p "$CONFDIR"
+	chmod 700 "$CONFDIR"
+}
+
+ensure_keys() {
+	iface="${1:-wg0}"
+	key="$CONFDIR/${iface}.key"
+	pub="$CONFDIR/${iface}.pub"
+	ensure_dir
+	if [ ! -f "$key" ]; then
+		umask 077
+		wg genkey > "$key"
+		chmod 600 "$key"
+		wg pubkey < "$key" > "$pub"
+		chmod 644 "$pub"
+	elif [ ! -f "$pub" ]; then
+		wg pubkey < "$key" > "$pub"
+		chmod 644 "$pub"
+	fi
+}
+
+cmd_pubkey() {
+	iface="${1:-wg0}"
+	ensure_keys "$iface"
+	cat "$CONFDIR/${iface}.pub"
+}
+
+open_listen_port() {
+	port="$1"
+	case "$port" in
+		""|*[!0-9]*) return 0 ;;
+	esac
+	cat > /etc/nftables.d/50_wireguard.nft <<EOF
+#!/usr/sbin/nft -f
+
+table inet filter {
+	chain input {
+		udp dport ${port} accept comment "accept WireGuard"
+	}
+}
+EOF
+	chmod 644 /etc/nftables.d/50_wireguard.nft
+	nft -f /etc/nftables.d/50_wireguard.nft
+}
+
+enable_iface() {
+	iface="$1"
+	conf="$CONFDIR/${iface}.conf"
+	[ -f "$conf" ] || die "找不到 $conf"
+	chmod 600 "$conf"
+	systemctl enable --now "wg-quick@${iface}"
+}
+
+cmd_import() {
+	need_root
+	src="${1:-}"
+	[ -n "$src" ] || die "请指定配置文件"
+	[ -f "$src" ] || die "文件不存在: $src"
+	iface="${2:-}"
+	if [ -z "$iface" ]; then
+		base=$(basename "$src")
+		iface=${base%.conf}
+	fi
+	case "$iface" in
+		""|*[!a-zA-Z0-9_-]*) die "接口名不合法: $iface" ;;
+	esac
+	ensure_dir
+	cp "$src" "$CONFDIR/${iface}.conf"
+	chmod 600 "$CONFDIR/${iface}.conf"
+	port=$(awk -F"[= ]+" "tolower(\$1)==\"listenport\"{print \$2; exit}" "$CONFDIR/${iface}.conf")
+	[ -n "${port:-}" ] && open_listen_port "$port"
+	enable_iface "$iface"
+	wg show "$iface" || true
+	echo "已导入并启动 $iface，开机将自动拉起。"
+}
+
+cmd_up() {
+	need_root
+	iface="${1:-wg0}"
+	[ -f "$CONFDIR/${iface}.conf" ] || die "找不到 $CONFDIR/${iface}.conf"
+	if systemctl is-enabled "wg-quick@${iface}" >/dev/null 2>&1 || systemctl is-active "wg-quick@${iface}" >/dev/null 2>&1; then
+		systemctl restart "wg-quick@${iface}"
+	else
+		wg-quick up "$iface"
+	fi
+	wg show "$iface"
+}
+
+cmd_down() {
+	need_root
+	iface="${1:-wg0}"
+	if systemctl is-active "wg-quick@${iface}" >/dev/null 2>&1; then
+		systemctl stop "wg-quick@${iface}"
+	else
+		wg-quick down "$iface" 2>/dev/null || true
+	fi
+}
+
+cmd_enable() {
+	need_root
+	iface="${1:-wg0}"
+	enable_iface "$iface"
+	echo "已设置 $iface 开机自启并启动。"
+}
+
+cmd_disable() {
+	need_root
+	iface="${1:-wg0}"
+	systemctl disable --now "wg-quick@${iface}" 2>/dev/null || true
+	echo "已关闭 $iface 并取消开机自启。"
+}
+
+cmd_status() {
+	iface="${1:-}"
+	if [ -n "$iface" ]; then
+		systemctl --no-pager --full status "wg-quick@${iface}" || true
+		wg show "$iface" || true
+	else
+		if ! wg show 2>/dev/null; then
+			echo "当前没有已启动的 WireGuard 接口。"
+		fi
+		echo
+		ls -1 "$CONFDIR"/*.conf 2>/dev/null || echo "还没有配置文件。"
+	fi
+}
+
+prompt() {
+	# $1 varname, $2 text, $3 optional default
+	def="${3-}"
+	if [ -n "$def" ]; then
+		printf "%s [%s]: " "$2" "$def"
+	else
+		printf "%s: " "$2"
+	fi
+	read -r val || val=""
+	[ -n "$val" ] || val="$def"
+	eval "$1=\"\$val\""
+}
+
+cmd_interactive() {
+	need_root
+	echo "配置 WireGuard 接口"
+	prompt iface "接口名" "wg0"
+	case "$iface" in
+		""|*[!a-zA-Z0-9_-]*) die "接口名不合法" ;;
+	esac
+	ensure_keys "$iface"
+	pub=$(cat "$CONFDIR/${iface}.pub")
+	key=$(cat "$CONFDIR/${iface}.key")
+	echo "本机公钥: $pub"
+	echo "把这个公钥加到对端（服务器或对方）的 Peer 里。"
+	prompt addr "本机地址 Address（如 10.10.10.10/24）" ""
+	[ -n "$addr" ] || die "Address 不能为空"
+	prompt lport "本机监听端口 ListenPort（客户端可留空）" ""
+	prompt dns "DNS（可留空）" ""
+	prompt peerpk "对端公钥 PublicKey" ""
+	[ -n "$peerpk" ] || die "对端公钥不能为空"
+	prompt endpoint "对端 Endpoint（host:port，可留空）" ""
+	prompt allowed "AllowedIPs" "0.0.0.0/0, ::/0"
+	prompt keepalive "PersistentKeepalive" "25"
+	umask 077
+	{
+		echo "[Interface]"
+		echo "Address = $addr"
+		echo "PrivateKey = $key"
+		[ -n "$lport" ] && echo "ListenPort = $lport"
+		[ -n "$dns" ] && echo "DNS = $dns"
+		echo
+		echo "[Peer]"
+		echo "PublicKey = $peerpk"
+		[ -n "$endpoint" ] && echo "Endpoint = $endpoint"
+		echo "AllowedIPs = $allowed"
+		[ -n "$keepalive" ] && echo "PersistentKeepalive = $keepalive"
+	} > "$CONFDIR/${iface}.conf"
+	chmod 600 "$CONFDIR/${iface}.conf"
+	[ -n "$lport" ] && open_listen_port "$lport"
+	enable_iface "$iface"
+	echo "已写入 $CONFDIR/${iface}.conf 并开机自启。"
+	wg show "$iface" || true
+}
+
+cmd="${1:-}"
+if [ "$#" -gt 0 ]; then
+	shift
+fi
+case "$cmd" in
+	"") cmd_interactive ;;
+	import) cmd_import "$@" ;;
+	pubkey) cmd_pubkey "$@" ;;
+	status) cmd_status "$@" ;;
+	up) cmd_up "$@" ;;
+	down) cmd_down "$@" ;;
+	enable) cmd_enable "$@" ;;
+	disable) cmd_disable "$@" ;;
+	-h|--help|help) usage ;;
+	*) usage; die "未知命令: $cmd" ;;
+esac

@@ -1,0 +1,13 @@
+[Unit]
+Description=Cepheus persistent directory mounts
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /opt/cepheus-panel/api/mount_ctl.py --boot
+TimeoutStartSec=45
+
+[Install]
+WantedBy=multi-user.target

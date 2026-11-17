@@ -1,0 +1,8 @@
+#!/usr/sbin/nft -f
+
+table inet filter {
+	chain input {
+		tcp dport { 139, 445 } accept comment "accept cepheus-samba"
+		udp dport { 137, 138 } accept comment "accept cepheus-samba"
+	}
+}

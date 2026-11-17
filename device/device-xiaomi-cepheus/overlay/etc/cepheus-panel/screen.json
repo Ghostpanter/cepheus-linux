@@ -1,0 +1,9 @@
+{
+  "burnin_protect": true,
+  "orbit": true,
+  "orbit_px": 12,
+  "rest_enabled": true,
+  "rest_interval_sec": 720,
+  "rest_duration_sec": 45,
+  "kiosk_brightness": 320
+}

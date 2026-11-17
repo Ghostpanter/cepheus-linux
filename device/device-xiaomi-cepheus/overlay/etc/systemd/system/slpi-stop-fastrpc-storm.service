@@ -1,0 +1,13 @@
+[Unit]
+Description=Stop SLPI remoteproc to prevent FastRPC probe storm
+DefaultDependencies=yes
+After=systemd-udevd.service msm-firmware-loader.service sysinit.target
+Wants=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/slpi-stop-fastrpc-storm.sh start
+
+[Install]
+WantedBy=multi-user.target

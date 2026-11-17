@@ -1,0 +1,14 @@
+#!/bin/sh
+# Global commands: screen on / screen off
+case "${1:-}" in
+    on|off)
+        if [ "$(id -u)" -eq 0 ]; then
+            exec /usr/local/sbin/cepheus-screen "$1"
+        fi
+        exec sudo -n /usr/local/sbin/cepheus-screen "$1"
+        ;;
+    *)
+        echo "usage: screen on|off" >&2
+        exit 2
+        ;;
+esac

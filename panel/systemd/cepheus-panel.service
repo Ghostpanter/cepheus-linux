@@ -1,0 +1,16 @@
+[Unit]
+Description=Cepheus device control panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cepheus-panel
+ExecStart=/usr/bin/python3 /opt/cepheus-panel/api/cepheus_panel.py --bind 0.0.0.0 --port 8088 --web /opt/cepheus-panel/web
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,2 @@
+# Allow the default user to run screen on/off without a password.
+user ALL=(root) NOPASSWD: /usr/local/sbin/cepheus-screen on, /usr/local/sbin/cepheus-screen off

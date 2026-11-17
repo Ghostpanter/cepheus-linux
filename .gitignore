@@ -1,0 +1,26 @@
+# Binaries: published as GitHub Release assets, not in git
+apks/*.apk
+images/
+# Never commit: stock partition dumps (IMEI/EFS, persist, devinfo)
+backup/
+*.img
+.DS_Store
+CLAUDE.local.md
+
+# local / secrets / build artifacts (do not add)
+*.img
+*.apk
+build.log
+flash.log
+phone-config-secrets/
+**/wg0.conf
+**/wg0.key
+**/*preshared*
+**/authorized_keys
+**/.ssh/
+backup*/
+pmbootstrap-work/
+*.tgz
+.env
+PHONE_PASS
+cepheus-images*/

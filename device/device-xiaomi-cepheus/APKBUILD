@@ -1,0 +1,73 @@
+# Reference: <https://postmarketos.org/devicepkg>
+maintainer="Alexey Minnekhanov <alexeymin@postmarketos.org>"
+pkgname=device-xiaomi-cepheus
+pkgdesc="Xiaomi Mi 9"
+pkgver=7
+pkgrel=3
+url="https://postmarketos.org"
+license="MIT"
+arch="aarch64"
+# !fhs: live overlay installs the panel under /opt, helpers under
+# /usr/local, and helpers under /usr/local (no operator keys in the published overlay).
+options="!check !archcheck !fhs !strip"
+depends="
+	linux-postmarketos-qcom-sm8150
+	bootmac
+	mkbootimg
+	postmarketos-base
+	py3-pillow
+	font-wqy-zenhei
+	cifs-utils
+	docker
+	vsftpd
+	wireguard-tools
+"
+makedepends="devicepkg-dev"
+subpackages="$pkgname-nonfree-firmware:nonfree_firmware"
+source="deviceinfo kernel-cmdline.conf 90-bootmac-wifi.rules cepheus-live-overlay.tar"
+
+build() {
+	devicepkg_build $startdir $pkgname
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+	install -Dm644 "$srcdir"/90-bootmac-wifi.rules -t "$pkgdir"/etc/udev/rules.d/
+
+	# Bake in live-device fixes plus afternoon panel/kiosk/burn-in/file-share
+	# work. Do not enable kiosk, samba, ftp, or wg-quick here.
+	tar -C "$pkgdir" -xf "$srcdir"/cepheus-live-overlay.tar
+	chmod 755 "$pkgdir"/usr/local/sbin/slpi-stop-fastrpc-storm.sh \
+		"$pkgdir"/usr/local/sbin/cepheus-ath10k-board.sh \
+		"$pkgdir"/usr/local/sbin/cepheus-screen \
+		"$pkgdir"/usr/local/sbin/cepheus-init \
+		"$pkgdir"/usr/local/sbin/wg-config \
+		"$pkgdir"/usr/local/sbin/wg0-refresh-endpoint.sh \
+		"$pkgdir"/usr/local/bin/screen \
+		"$pkgdir"/usr/local/bin/wifi-connect \
+		"$pkgdir"/etc/systemd/system-generators/cepheus-enable-fixes \
+		"$pkgdir"/etc/NetworkManager/dispatcher.d/50-wg0-refresh
+	mkdir -p "$pkgdir"/etc/systemd/system/multi-user.target.wants
+	ln -sf /etc/systemd/system/slpi-stop-fastrpc-storm.service \
+		"$pkgdir"/etc/systemd/system/multi-user.target.wants/slpi-stop-fastrpc-storm.service
+	ln -sf /etc/systemd/system/cepheus-ath10k-board.service \
+		"$pkgdir"/etc/systemd/system/multi-user.target.wants/cepheus-ath10k-board.service
+	ln -sf /etc/systemd/system/cepheus-screen-off.service \
+		"$pkgdir"/etc/systemd/system/multi-user.target.wants/cepheus-screen-off.service
+	ln -sf /etc/systemd/system/cepheus-panel.service \
+		"$pkgdir"/etc/systemd/system/multi-user.target.wants/cepheus-panel.service
+	# kiosk / samba / ftp / mounts / wg-quick stay present but not enabled
+}
+
+nonfree_firmware() {
+	pkgdesc="Modem, DSP and WiFi firmware (used in place from the stock partitions)"
+	depends="msm-firmware-loader qrtr tqftpserv rmtfs"
+	mkdir "$subpkgdir"
+}
+
+sha512sums="
+ffc4240164815cba73fc24adb5f959d9aed7a99726b335bb38aaf377645986ebb28e678eaa5ade4b346a902f22724bbbb89f3c2a167e0a5599adbcddbd46cb10  deviceinfo
+e3f3f053066c23ac366fc13e999814802f02ac64f094291be7d09de35fd8e544cf1c19df58d121f49a15d21b278f44004443246ecaf4a4cc1db68e0a72dc428d  kernel-cmdline.conf
+2297f9bf350893e9f4cca12aeee8e1f1120d56a24fe01e324728148be164a833716d81f3b576965fe234a233f15513a003b718cc80484bb990e47a3a74cff2c7  90-bootmac-wifi.rules
+85f3e833357b49a9afe5cbb9570241dcbb6b362a7ad0825850bda424a61eb3b7c52daa1538848def713ae811783d742bbcd00b61daa1e15718f2b694b40454b2  cepheus-live-overlay.tar
+"

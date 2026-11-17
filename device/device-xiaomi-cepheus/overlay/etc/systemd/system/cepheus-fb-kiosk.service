@@ -1,0 +1,20 @@
+[Unit]
+Description=Cepheus framebuffer monitor kiosk
+Documentation=file:///opt/cepheus-panel/api/fb_kiosk.py
+After=local-fs.target cepheus-screen-off.service
+# If 开机关屏 also starts at boot, run after it, then turn the panel back on.
+
+[Service]
+Type=simple
+User=root
+Nice=10
+ExecStartPre=/usr/local/sbin/cepheus-screen on
+ExecStart=/usr/bin/python3 /opt/cepheus-panel/api/fb_kiosk.py
+ExecStopPost=/usr/bin/python3 /opt/cepheus-panel/api/fb_kiosk.py --restore
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+SuccessExitStatus=0 143
+
+[Install]
+WantedBy=multi-user.target

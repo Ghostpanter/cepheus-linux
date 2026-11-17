@@ -1,0 +1,14 @@
+#!/bin/sh
+# NetworkManager dispatcher: when wlan0 gets (or renews) a default route,
+# refresh the WireGuard wg0 handshake if needed. Do not flap a healthy iface.
+IFACE="${1-}"
+ACTION="${2-}"
+case "$IFACE" in
+	wlan0) ;;
+	*) exit 0 ;;
+esac
+case "$ACTION" in
+	up|dhcp4-change|connectivity-change|reapply) ;;
+	*) exit 0 ;;
+esac
+exec /usr/local/sbin/wg0-refresh-endpoint.sh

@@ -1,0 +1,6 @@
+#%PAM-1.0
+# Installed by cepheus-panel for vsftpd local-user auth. No anonymous write.
+auth      include   base-auth
+account   include   base-account
+password  include   base-password
+session   include   base-session

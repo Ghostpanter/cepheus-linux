@@ -1,0 +1,8 @@
+#!/usr/sbin/nft -f
+
+table inet filter {
+	chain input {
+		tcp dport 21 accept comment "accept cepheus-ftp"
+		tcp dport 50000-50010 accept comment "accept cepheus-ftp"
+	}
+}

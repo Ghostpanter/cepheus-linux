@@ -1,0 +1,2 @@
+# If SLPI is started later, stop it again to avoid the FastRPC EINVAL probe storm.
+SUBSYSTEM=="remoteproc", ATTR{name}=="slpi", ACTION=="add|change", RUN+="/usr/local/sbin/slpi-stop-fastrpc-storm.sh udev"

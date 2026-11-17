@@ -1,0 +1,15 @@
+#!/bin/sh
+# Enable cepheus fix units via the systemd generator (runs before regular
+# wants are processed). Used because adding entries to the already-full
+# hashed directory /etc/systemd/system/multi-user.target.wants with
+# debugfs is not possible; the running system can grow that directory.
+normal_dir="${1:-/run/systemd/generator}"
+want="$normal_dir/multi-user.target.wants"
+mkdir -p "$want"
+for u in slpi-stop-fastrpc-storm.service \
+         cepheus-ath10k-board.service \
+         cepheus-screen-off.service \
+         cepheus-panel.service
+do
+    ln -sf "/etc/systemd/system/$u" "$want/$u"
+done

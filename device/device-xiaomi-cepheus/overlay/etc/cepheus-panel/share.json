@@ -1,0 +1,8 @@
+{
+  "path": "/home/user/share",
+  "share_name": "share",
+  "workgroup": "WORKGROUP",
+  "username": "user",
+  "read_only": false,
+  "ftp_anonymous_read": false
+}

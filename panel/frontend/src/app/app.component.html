@@ -1,0 +1,24 @@
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">C</div>
+      <div>
+        <h1>Cepheus 面板</h1>
+        <p>小米 9 服务机</p>
+      </div>
+    </div>
+    <nav class="nav">
+      <a routerLink="/overview" routerLinkActive="active">概览</a>
+      <a routerLink="/screen" routerLinkActive="active">屏幕</a>
+      <a routerLink="/wifi" routerLinkActive="active">Wi-Fi</a>
+      <a routerLink="/services" routerLinkActive="active">服务</a>
+      <a routerLink="/hardware" routerLinkActive="active">硬件</a>
+      <a routerLink="/share" routerLinkActive="active">文件共享</a>
+      <a routerLink="/files" routerLinkActive="active">文件管理</a>
+    </nav>
+    <div class="sidebar-foot">局域网 / WireGuard 访问</div>
+  </aside>
+  <main class="main">
+    <router-outlet />
+  </main>
+</div>

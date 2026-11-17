@@ -1,0 +1,7 @@
+/* layout lives in global styles */
+
+.bright-range {
+  width: 100%;
+  margin: 8px 0 0;
+  accent-color: #5e72e4;
+}
